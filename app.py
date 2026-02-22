@@ -3,6 +3,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="日本株 25日移動平均線乖離率", layout="wide")
@@ -326,8 +327,12 @@ def fetch_data(code: str) -> pd.DataFrame | None:
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        df = df[["Close"]].dropna()
+        # Close は必須、Volume は欠損があっても保持
+        cols = [c for c in ["Close", "Volume"] if c in df.columns]
+        df = df[cols].dropna(subset=["Close"])
         df["MA25"] = df["Close"].rolling(window=25).mean()
+        if "Volume" in df.columns:
+            df["VolumeMA20"] = df["Volume"].rolling(window=20).mean()
         return df
     except Exception:
         return None
@@ -339,6 +344,21 @@ def calc_deviation(df: pd.DataFrame) -> float | None:
     latest_close = df["Close"].iloc[-1]
     latest_ma25 = df["MA25"].iloc[-1]
     return (latest_close - latest_ma25) / latest_ma25 * 100
+
+
+def calc_volume_ratio(df: pd.DataFrame) -> float | None:
+    """当日出来高 ÷ 過去20日平均出来高を返す。データ不足時は None。"""
+    if df is None or "Volume" not in df.columns or "VolumeMA20" not in df.columns:
+        return None
+    vol = df["Volume"].dropna()
+    vma20 = df["VolumeMA20"].dropna()
+    if vol.empty or vma20.empty:
+        return None
+    latest_vol = float(vol.iloc[-1])
+    latest_vma20 = float(vma20.iloc[-1])
+    if pd.isna(latest_vma20) or latest_vma20 == 0:
+        return None
+    return latest_vol / latest_vma20
 
 
 def calc_day_change(df: pd.DataFrame) -> float | None:
@@ -383,24 +403,81 @@ def show_market_condition(nikkei_change: float | None) -> None:
 def build_chart(df: pd.DataFrame, code: str) -> go.Figure:
     cutoff = datetime.today() - timedelta(days=90)
     df_3m = df[df.index >= cutoff]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df_3m.index, y=df_3m["Close"],
-        mode="lines", name="株価",
-        line=dict(color="#2196F3", width=1.5),
-    ))
-    fig.add_trace(go.Scatter(
-        x=df_3m.index, y=df_3m["MA25"],
-        mode="lines", name="25日MA",
-        line=dict(color="#FF9800", width=2, dash="dot"),
-    ))
-    fig.update_layout(
-        title=f"{ticker_symbol(code)} — 過去3ヶ月チャート",
-        xaxis_title="日付", yaxis_title="株価 (円)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        height=400, margin=dict(l=0, r=0, t=40, b=0),
-        hovermode="x unified",
+
+    has_volume = (
+        "Volume" in df_3m.columns
+        and "VolumeMA20" in df_3m.columns
+        and df_3m["Volume"].notna().any()
     )
+
+    if has_volume:
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            row_heights=[0.68, 0.32],
+            vertical_spacing=0.04,
+        )
+        # ─ 株価チャート（上段）─
+        fig.add_trace(go.Scatter(
+            x=df_3m.index, y=df_3m["Close"],
+            mode="lines", name="株価",
+            line=dict(color="#2196F3", width=1.5),
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_3m.index, y=df_3m["MA25"],
+            mode="lines", name="25日MA",
+            line=dict(color="#FF9800", width=2, dash="dot"),
+        ), row=1, col=1)
+
+        # ─ 出来高バー（下段）: 急増日は赤、通常は水色 ─
+        vols = df_3m["Volume"].fillna(0)
+        vma20s = df_3m["VolumeMA20"].fillna(0)
+        bar_colors = [
+            "#F44336" if (m > 0 and v >= m * 2) else "#90CAF9"
+            for v, m in zip(vols, vma20s)
+        ]
+        fig.add_trace(go.Bar(
+            x=df_3m.index, y=vols,
+            name="出来高",
+            marker_color=bar_colors,
+            showlegend=True,
+        ), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_3m.index, y=df_3m["VolumeMA20"],
+            mode="lines", name="出来高20日MA",
+            line=dict(color="#FF9800", width=1.5, dash="dash"),
+        ), row=2, col=1)
+
+        fig.update_layout(
+            title=f"{ticker_symbol(code)} — 過去3ヶ月チャート",
+            yaxis_title="株価 (円)",
+            yaxis2_title="出来高",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=520, margin=dict(l=0, r=0, t=40, b=0),
+            hovermode="x unified",
+            bargap=0.1,
+        )
+        fig.update_xaxes(title_text="日付", row=2, col=1)
+    else:
+        # 出来高データなし: 既存の単一チャート
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_3m.index, y=df_3m["Close"],
+            mode="lines", name="株価",
+            line=dict(color="#2196F3", width=1.5),
+        ))
+        fig.add_trace(go.Scatter(
+            x=df_3m.index, y=df_3m["MA25"],
+            mode="lines", name="25日MA",
+            line=dict(color="#FF9800", width=2, dash="dot"),
+        ))
+        fig.update_layout(
+            title=f"{ticker_symbol(code)} — 過去3ヶ月チャート",
+            xaxis_title="日付", yaxis_title="株価 (円)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=400, margin=dict(l=0, r=0, t=40, b=0),
+            hovermode="x unified",
+        )
     return fig
 
 
@@ -439,20 +516,22 @@ def scan_all_stocks(
                 progress_bar.progress((batch_idx + 1) / total_batches)
                 continue
 
-            # Close 列を取り出す
+            # Close / Volume 列を取り出す
             # yfinance 0.2.x マルチティッカー: MultiIndex columns (field, ticker)
             # 単一ティッカー: フラット columns
-            close_raw = raw["Close"]
-            if isinstance(close_raw, pd.Series):
-                # 1銘柄のみのバッチ（稀）
-                closes_map: dict[str, pd.Series] = {batch_syms[0]: close_raw}
-            else:
-                # 複数銘柄: columns = ティッカーシンボル
-                closes_map = {
-                    sym: close_raw[sym]
-                    for sym in batch_syms
-                    if sym in close_raw.columns
-                }
+            def _extract_field(raw_df: pd.DataFrame, field: str, syms: list[str]) -> dict[str, pd.Series]:
+                if field not in raw_df.columns and not isinstance(raw_df.columns, pd.MultiIndex):
+                    return {}
+                try:
+                    block = raw_df[field]
+                except KeyError:
+                    return {}
+                if isinstance(block, pd.Series):
+                    return {syms[0]: block}
+                return {s: block[s] for s in syms if s in block.columns}
+
+            closes_map = _extract_field(raw, "Close", batch_syms)
+            volumes_map = _extract_field(raw, "Volume", batch_syms)
 
             for sym, code in zip(batch_syms, batch_codes):
                 if sym not in closes_map:
@@ -466,12 +545,24 @@ def scan_all_stocks(
                     if pd.isna(ma25) or pd.isna(latest):
                         continue
                     dev = (latest - ma25) / ma25 * 100
+
+                    # [出来高異常検知] 出来高比率を計算
+                    vol_ratio: float | None = None
+                    if sym in volumes_map:
+                        vols = volumes_map[sym].dropna()
+                        if len(vols) >= 21:
+                            vma20 = float(vols.rolling(20).mean().iloc[-1])
+                            today_vol = float(vols.iloc[-1])
+                            if vma20 > 0:
+                                vol_ratio = today_vol / vma20
+
                     results.append({
                         "コード": sym,
                         "銘柄名": STOCK_LIST.get(code, code),
                         "現在株価 (円)": latest,
                         "25日MA (円)": ma25,
                         "乖離率 (%)": dev,
+                        "出来高比率": vol_ratio,
                     })
                 except Exception:
                     continue
@@ -503,21 +594,36 @@ def show_scan_results(df: pd.DataFrame, threshold: float) -> None:
 
     st.success(f"スキャン完了: {len(df)} 銘柄取得")
 
+    _VOL_SURGE_THRESHOLD = 2.0
+
     def highlight_scan_row(row):
-        if isinstance(row["乖離率 (%)"], float) and row["乖離率 (%)"] <= threshold:
+        dev = row.get("乖離率 (%)", None)
+        vol = row.get("出来高比率", None)
+        dev_hit = isinstance(dev, float) and dev <= threshold
+        vol_hit = isinstance(vol, float) and vol >= _VOL_SURGE_THRESHOLD
+        if dev_hit and vol_hit:
+            # 乖離率しきい値以下 かつ 出来高急増 → 特強調（アンバー）
+            return ["background-color: #FF6F00; color: #FFFFFF; font-weight: bold"] * len(row)
+        if dev_hit:
+            # 乖離率しきい値以下のみ → 赤
             return ["background-color: #FFCDD2; color: #B71C1C; font-weight: bold"] * len(row)
         return [""] * len(row)
 
+    def fmt_vol_ratio(x) -> str:
+        if not isinstance(x, float):
+            return "—"
+        badge = "🔥 " if x >= _VOL_SURGE_THRESHOLD else ""
+        return f"{badge}{x:.2f}x"
+
     def styled_table(df_part: pd.DataFrame):
-        return (
-            df_part.style
-            .apply(highlight_scan_row, axis=1)
-            .format({
-                "現在株価 (円)": "{:,.0f}",
-                "25日MA (円)": "{:,.2f}",
-                "乖離率 (%)": lambda x: f"{x:+.2f}%" if isinstance(x, float) else "—",
-            })
-        )
+        fmt: dict = {
+            "現在株価 (円)": "{:,.0f}",
+            "25日MA (円)": "{:,.2f}",
+            "乖離率 (%)": lambda x: f"{x:+.2f}%" if isinstance(x, float) else "—",
+        }
+        if "出来高比率" in df_part.columns:
+            fmt["出来高比率"] = fmt_vol_ratio
+        return df_part.style.apply(highlight_scan_row, axis=1).format(fmt)
 
     top_n = 20
     top_df = df.head(top_n)
@@ -531,7 +637,9 @@ def show_scan_results(df: pd.DataFrame, threshold: float) -> None:
             st.dataframe(styled_table(rest_df), use_container_width=True, hide_index=True)
 
     st.caption(
-        f"※ セクター: **{sector_label}** — 乖離率 {threshold:.0f}% 以下の銘柄を赤くハイライトしています。"
+        f"※ セクター: **{sector_label}** — "
+        f"乖離率 {threshold:.0f}% 以下は赤、"
+        f"さらに出来高比率 {_VOL_SURGE_THRESHOLD:.0f}x 以上はアンバーで強調表示。"
     )
 
 
@@ -553,7 +661,7 @@ with tab1:
         DEVIATION_THRESHOLD = SECTOR_THRESHOLDS[sector_label]
 
         summary_rows = []
-        chart_data: dict[str, tuple[pd.DataFrame, float, float | None]] = {}
+        chart_data: dict[str, tuple[pd.DataFrame, float, float | None, float | None]] = {}
 
         with st.spinner("データ取得中..."):
             nikkei_change = fetch_nikkei_change()
@@ -562,6 +670,7 @@ with tab1:
                 df = fetch_data(code)
                 dev = calc_deviation(df)
                 day_change = calc_day_change(df)
+                vol_ratio = calc_volume_ratio(df)  # [出来高異常検知]
 
                 if df is not None and dev is not None:
                     latest_close = float(df["Close"].iloc[-1])
@@ -572,7 +681,7 @@ with tab1:
                         "25日MA (円)": f"{latest_ma25:,.0f}",
                         "乖離率 (%)": dev,
                     })
-                    chart_data[code] = (df, dev, day_change)
+                    chart_data[code] = (df, dev, day_change, vol_ratio)
                 else:
                     summary_rows.append({
                         "コード": ticker_symbol(code),
@@ -609,8 +718,18 @@ with tab1:
         st.subheader("個別チャート（過去3ヶ月）")
         nikkei_declining = nikkei_change is not None and nikkei_change <= -1.0
 
-        for code, (df, dev, day_change) in chart_data.items():
-            with st.expander(f"{ticker_symbol(code)}　乖離率: {dev:+.2f}%", expanded=True):
+        for code, (df, dev, day_change, vol_ratio) in chart_data.items():
+            vol_surge = vol_ratio is not None and vol_ratio >= 2.0
+            # エキスパンダーヘッダーにバッジを付与
+            header_badges = ""
+            if vol_surge:
+                header_badges += "  🔥"
+            if nikkei_declining and day_change is not None and day_change < 0:
+                header_badges += "  📌"
+            with st.expander(
+                f"{ticker_symbol(code)}　乖離率: {dev:+.2f}%{header_badges}",
+                expanded=True,
+            ):
                 col_left, col_right = st.columns([3, 1])
                 with col_left:
                     if dev <= DEVIATION_THRESHOLD:
@@ -618,6 +737,10 @@ with tab1:
                     else:
                         st.info(f"乖離率 {dev:+.2f}%")
                 with col_right:
+                    # [出来高異常検知] 急増バッジ
+                    if vol_surge:
+                        ratio_str = f"{vol_ratio:.2f}x" if vol_ratio is not None else ""
+                        st.error(f"🔥 出来高急増\n({ratio_str})")
                     if nikkei_declining and day_change is not None and day_change < 0:
                         st.warning("📌 連れ安の可能性あり")
                 st.plotly_chart(build_chart(df, code), use_container_width=True)
