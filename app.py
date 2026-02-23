@@ -410,6 +410,15 @@ with st.sidebar:
         height=150,
     )
 
+    # ── 銘柄名ヒント表示 ──
+    _hint_codes = parse_codes(raw_codes)
+    if _hint_codes:
+        _hint_lines = []
+        for _c in _hint_codes:
+            _name = STOCK_LIST.get(_c)
+            _hint_lines.append(f"{_c} {_name}" if _name else _c)
+        st.caption("  \n".join(_hint_lines))
+
     # ── [ウォッチリスト] プリセット保存ボタン ──
     _active_preset = st.session_state.get("preset_radio", "カスタム")
     if _active_preset != "カスタム":
@@ -845,10 +854,11 @@ with tab1:
             ):
                 col_left, col_right = st.columns([3, 1])
                 with col_left:
+                    _vol_str = f"　出来高比率: {vol_ratio:.2f}x" if vol_ratio is not None else ""
                     if dev <= DEVIATION_THRESHOLD:
-                        st.error(f"乖離率 {dev:+.2f}% — 25日MAを {abs(dev):.2f}% 下回っています")
+                        st.error(f"乖離率 {dev:+.2f}% — 25日MAを {abs(dev):.2f}% 下回っています{_vol_str}")
                     else:
-                        st.info(f"乖離率 {dev:+.2f}%")
+                        st.info(f"乖離率 {dev:+.2f}%{_vol_str}")
                 with col_right:
                     # [出来高異常検知] 急増バッジ
                     if vol_surge:
