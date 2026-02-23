@@ -1,4 +1,6 @@
+import json
 import math
+from pathlib import Path
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -280,28 +282,7 @@ SECTOR_THRESHOLDS: dict[str, float] = {
 _SCAN_BATCH_SIZE = 50
 
 # ──────────────────────────────────────────
-# サイドバー
-# ──────────────────────────────────────────
-with st.sidebar:
-    st.header("銘柄設定")
-
-    sector_label = st.selectbox(
-        "セクター（ハイライトしきい値）",
-        options=list(SECTOR_THRESHOLDS.keys()),
-        index=1,
-        help="選択したセクターのしきい値で乖離率ハイライトの基準を変えます",
-    )
-
-    raw_codes = st.text_area(
-        "銘柄コード（複数の場合は改行またはカンマ区切り）",
-        value="7203\n6758\n9984",
-        height=150,
-    )
-    fetch_btn = st.button("データ取得", type="primary", use_container_width=True)
-
-
-# ──────────────────────────────────────────
-# ヘルパー関数
+# ユーティリティ（サイドバーより前に定義が必要）
 # ──────────────────────────────────────────
 
 def parse_codes(text: str) -> list[str]:
@@ -316,6 +297,138 @@ def parse_codes(text: str) -> list[str]:
 def ticker_symbol(code: str) -> str:
     return code if code.endswith(".T") else f"{code}.T"
 
+
+# ──────────────────────────────────────────
+# ウォッチリスト永続化
+# ──────────────────────────────────────────
+
+_WATCHLIST_FILE = Path(__file__).parent / "watchlist.json"
+_PRESET_OPTIONS = ["カスタム", "ウォッチリスト", "保有銘柄"]
+_PRESET_KEYS = {"ウォッチリスト": "watchlist", "保有銘柄": "holdings"}
+
+
+def _default_presets() -> dict[str, list[str]]:
+    return {
+        "watchlist": ["7203", "6758", "9984"],
+        "holdings": ["8306", "8316", "8411"],
+    }
+
+
+def load_watchlist() -> dict[str, list[str]]:
+    """JSON ファイルからプリセットを読み込む。失敗時はデフォルト値を返す。"""
+    defaults = _default_presets()
+    try:
+        if _WATCHLIST_FILE.exists():
+            data = json.loads(_WATCHLIST_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                merged = {**defaults}
+                for k in ("watchlist", "holdings"):
+                    if k in data and isinstance(data[k], list):
+                        merged[k] = [str(c) for c in data[k]]
+                return merged
+    except Exception:
+        pass
+    return defaults
+
+
+def save_watchlist(presets: dict[str, list[str]]) -> None:
+    """プリセットを JSON ファイルに保存する。"""
+    try:
+        _WATCHLIST_FILE.write_text(
+            json.dumps(presets, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+# ──────────────────────────────────────────
+# セッション状態の初期化（サイドバー前）
+# ──────────────────────────────────────────
+
+if "wl_presets" not in st.session_state:
+    st.session_state.wl_presets = load_watchlist()
+
+if "codes_input" not in st.session_state:
+    st.session_state.codes_input = "\n".join(
+        st.session_state.wl_presets.get("watchlist", ["7203", "6758", "9984"])
+    )
+
+
+def _on_preset_change() -> None:
+    """プリセット切り替え時に銘柄コード入力欄を更新する。"""
+    preset = st.session_state.get("preset_radio", "カスタム")
+    if preset == "カスタム":
+        return
+    key = _PRESET_KEYS.get(preset)
+    if key:
+        codes = st.session_state.wl_presets.get(key, [])
+        st.session_state.codes_input = "\n".join(codes)
+
+
+def _save_preset() -> None:
+    """現在の銘柄コードを選択中のプリセットに保存する。"""
+    preset = st.session_state.get("preset_radio", "カスタム")
+    if preset == "カスタム":
+        return
+    key = _PRESET_KEYS.get(preset)
+    if key:
+        codes = parse_codes(st.session_state.get("codes_input", ""))
+        st.session_state.wl_presets[key] = codes
+        save_watchlist(st.session_state.wl_presets)
+        st.session_state["_save_toast"] = preset
+
+
+# ──────────────────────────────────────────
+# サイドバー
+# ──────────────────────────────────────────
+with st.sidebar:
+    st.header("銘柄設定")
+
+    # ── [ウォッチリスト] プリセット選択 ──
+    st.caption("プリセット")
+    st.radio(
+        "プリセット",
+        options=_PRESET_OPTIONS,
+        key="preset_radio",
+        on_change=_on_preset_change,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.divider()
+
+    sector_label = st.selectbox(
+        "セクター（ハイライトしきい値）",
+        options=list(SECTOR_THRESHOLDS.keys()),
+        index=1,
+        help="選択したセクターのしきい値で乖離率ハイライトの基準を変えます",
+    )
+
+    raw_codes = st.text_area(
+        "銘柄コード（複数の場合は改行またはカンマ区切り）",
+        key="codes_input",
+        height=150,
+    )
+
+    # ── [ウォッチリスト] プリセット保存ボタン ──
+    _active_preset = st.session_state.get("preset_radio", "カスタム")
+    if _active_preset != "カスタム":
+        st.button(
+            f"💾 {_active_preset}に保存",
+            on_click=_save_preset,
+            use_container_width=True,
+            help="現在の銘柄コードをプリセットに保存します（ブラウザを閉じても保持）",
+        )
+        # 保存完了トースト（on_click の次のレンダリングで表示）
+        if st.session_state.pop("_save_toast", None):
+            st.success(f"「{_active_preset}」を保存しました！", icon="💾")
+
+    fetch_btn = st.button("データ取得", type="primary", use_container_width=True)
+
+
+# ──────────────────────────────────────────
+# ヘルパー関数（parse_codes / ticker_symbol はサイドバー前に定義済み）
+# ──────────────────────────────────────────
 
 def fetch_data(code: str) -> pd.DataFrame | None:
     symbol = ticker_symbol(code)
